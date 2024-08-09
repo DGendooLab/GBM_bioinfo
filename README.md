@@ -1,7 +1,8 @@
 # DESeq2 Analysis
 ## Overview
 
-This document describes the analysis of RNA-seq data using DESeq2, a popular tool for differential gene expression analysis. The analysis includes steps for data import, differential expression analysis, and result visualization.
+This document describes the analysis of RNA-seq data using DESeq2, a popular tool for differential gene expression analysis. The analysis includes steps for data import, differential expression analysis, and result visualization. 
+All scripts were included in the "scripts" directory
 
 **Run list**
 1) trim_QC.sh
