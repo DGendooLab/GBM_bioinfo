@@ -12,8 +12,9 @@ All scripts were included in the "scripts" directory
     If not indexed, run Salmon-index.sh prior running Salmon.sh. This indexes the reference genome
 ----> 1-2-3 allow to then run the DeSeq2 analysisi in the R notebook
 4) VarScan.sh
-5) VCF_annotator tool (see [repo](https://github.com/marcellobeltrami/VCF_annotator) for instructions)
-6) MAF_tools.rmd (change inside file paths based on location of step 5 results. This file is generated running the previous step. The exapnded for furhter analysis is also included in repo as MAFTools_og.rmd).
+5) merge_vcf.sh (merge SNPs and INDEL from VarScan)
+6) VCF_annotator tool (see [repo](https://github.com/marcellobeltrami/VCF_annotator) for instructions)
+7) MAF_tools.rmd (change inside file paths based on location of step 5 results. This file is generated running the previous step. The exapnded for furhter analysis is also included in repo as MAFTools_og.rmd).
 
 ----> this allows to obtain variant calling files which were summarized as plots in the manuscript. These plots were generated using VCF Annotator and MAFTools_og.rmd. 
 
