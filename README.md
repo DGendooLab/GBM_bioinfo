@@ -1,7 +1,9 @@
 # DESeq2 Analysis
 ## Overview
+Description of the analysis of RNA-seq data comparing FEN-1 sensitive and FEN-1 resistance cell lines. The analysis includes steps for data import, differential expression analysis, variant analysis result visualization. GSEA was conducted using the GUI based tool found at: https://www.gsea-msigdb.org/gsea/index.jsp. GSEA results were visualized in GUI cytoscape with EnrichMap package.
 
-This document describes the analysis of RNA-seq data using DESeq2, a popular tool for differential gene expression analysis. The analysis includes steps for data import, differential expression analysis, and result visualization. 
+The results directory contains all final relevant results obtained. Furhter intermediate files can be obtained upon request.
+
 All scripts were included in the "scripts" directory
 
 **Run list**
