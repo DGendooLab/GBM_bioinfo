@@ -1,0 +1,557 @@
+---
+title: "DESeq2 analysis"
+author: Marcello Beltrami, Msc Bioinformatics 23/24
+output:
+  pdf_document: default
+  html_notebook: default
+---
+
+*Checks installation and loads packages.*
+
+```{r}
+if (!require("BiocManager", quietly = TRUE))
+    install.packages("BiocManager")
+
+if (!require("DESeq2", quietly = TRUE))
+    BiocManager::install("DESeq2")
+
+if (!require("org.Hs.eg.db", quietly = TRUE))
+    BiocManager::install("org.Hs.eg.db")
+
+if (!require("EnhancedVolcano", quietly = TRUE))
+    BiocManager::install("EnhancedVolcano")
+
+if (!require("tximport", quietly = TRUE))
+    BiocManager::install("tximport")
+
+if (!require("GenomicFeatures", quietly = TRUE))
+    BiocManager::install("GenomicFeatures")
+
+if (!require("vsn", quietly = TRUE))
+    BiocManager::install("vsn")
+
+if (!require("RColorBrewer", quietly = TRUE))
+    install.packages("RColorBrewer")
+
+if (!require("ggplot2", quietly = TRUE))
+    install.packages("ggplot2")
+```
+
+```{r}
+suppressWarnings(library(DESeq2)) #Carries out DGE analysis
+suppressWarnings(library(GenomicFeatures)) #add genomic metadata
+suppressWarnings(library(tximport)) #Imports tx object
+suppressWarnings(library(ReportingTools)) #Generates an HTML report from DeSeq object
+suppressWarnings(library(pheatmap)) #Generates heatmap for 
+suppressWarnings(library(RColorBrewer)) #Allows to access different color palettes. 
+suppressWarnings(library(vsn)) #visualizes transformations
+suppressWarnings(library(ggplot2))
+suppressWarnings(library(org.Hs.eg.db))
+suppressWarnings(library(EnhancedVolcano))
+setwd("/rds/projects/g/gendood-preclinomics/Marcello_Thesis/Project_1/GeneCounts_3.0")
+```
+
+#### *Data Import and Inputs*
+
+*Database construction*
+
+Create a txdb database to import the .sf files with tximport. Here function is defined and code is run. 
+```{r}
+#Function carrying out gene count importing from Salmon and creating sample table. 
+
+tximport.database <- function(samples_ID.vector, files_paths.list, gtf_file.path, txdb.filename){
+  
+  
+  txdb <- makeTxDbFromGFF(gtf_file.path)
+  saveDb(txdb, txdb.filename)
+  txdb <- loadDb(txdb.filename)
+  genes(txdb)
+  
+  #Transcripts are associated with gene IDs for gene-level summarization.
+  k <- keys(txdb, keytype = "TXNAME")
+  tx2gene <- select(txdb, k, "GENEID", "TXNAME")
+  
+  #Creates gene count and transcript counts from salmon SF files. 
+  txi.salmon.g <- tximport(files_paths.list, type = "salmon", tx2gene = tx2gene)
+  
+  
+  #Adds column names to gene counts. 
+  colnames(txi.salmon.g$counts) <- samples_ID.vector
+  colnames(txi.salmon.g$length)<- samples_ID.vector
+  colnames(txi.salmon.g$abundance)<- samples_ID.vector
+  
+  #Returns a list with salmon tximport and table metadata.
+  return(txi.salmon.g)
+}
+
+
+metadata_table <- function(conditions.vector,year.vector, tximport.object){
+  sampleTable <- data.frame(condition = conditions.vector, 
+                          year= year.vector) 
+  rownames(sampleTable) <- colnames(tximport.object)
+  
+  return(sampleTable)
+}
+```
+
+```{r}
+
+#Gets all files paths for the quant.sf outputted by salmon.
+files <- file.path("./salmon_star_3.0",
+                   list.files("./salmon_star_3.0"), "quant.sf")
+
+files
+samples_ID <-  c("R_BT594", "R_MBT357", "R_MBT373", "S_BT241", "S_BT935", "S_BT972", "S_MBT168")
+
+
+gtf <- "/rds/projects/g/gendood-preclinomics/Marcello_Thesis/Project_1/REF_GENOME/GRCh38.p14/gencode.v45.basic.annotation.gtf"
+txdb.ID <- "./v45.annotation.sqlite"
+condition <- c("Resistant","Resistant","Resistant","Sensitive","Sensitive","Sensitive","Sensitive")
+
+year= c("2017","2023","2023","2017","2017","2017","2023")
+
+##Data structures with sample S_MBT168 removed. 
+to_remove <- c(7) 
+files.outl.rm <- files[-to_remove]
+samples_ID.outl.rm <- samples_ID[-to_remove]
+condition.outl.rm <- condition[-to_remove]
+year.outl.rm <- year[-to_remove]
+
+
+#This is constructed after removing outliers. Change input names accordingly if want to include outliers
+txi.salmon.genes <- tximport.database(samples_ID.vector =samples_ID.outl.rm,
+                                      files_paths.list =files.outl.rm,
+                                      gtf_file.path=gtf,
+                                      txdb.filename=txdb.ID)
+
+
+
+SampleTable <- metadata_table(conditions.vector =condition.outl.rm ,
+                              year.vector =year.outl.rm,
+                              tximport.object = txi.salmon.genes)
+
+
+```
+Data structures with all samples 
+
+txi.salmon.genes <- tximport.database(samples_ID.vector = samples_ID, 
+                                      files_paths.list = files, 
+                                      gtf_file.path=gtf, 
+                                      txdb.filename=txdb.ID)
+
+SampleTable <- metadata_table(conditions.vector =condition ,
+                              year.vector =year,
+                              tximport.object = txi.salmon.genes)
+
+
+
+
+
+#### *Differential analysis*
+
+The main functions are:
+• DESeq - perform differential analysis
+    The differential expression analysis uses a generalized linear model of the form:
+                              Kij ∼ NB(µij , αi)
+                              µij = sj qij
+                              log2(qij ) = xj.βi
+  where counts Kij for gene i, sample j are modeled using a Negative Binomial distribution with fitted mean µij and a gene-specific dispersion parameter αi. The fitted mean is    composed of a sample-specific size factor sj and a parameter qij proportional to the expected true concentration of fragments for sample j. The coefficients βi give the log2 fold changes for gene i for each column of the model matrix X. The sample-specific size factors can be replaced by gene-specific normalization factors for each sample using normalizationFactors.
+
+
+• results - build a results table
+• lfcShrink - estimate shrunken LFC (posterior estimates) using apeglm & ashr pakges
+• vst - apply variance stabilizing transformation, e.g. for PCA or sample clustering
+• Plots, e.g.: plotPCA, plotMA, plotCounts
+
+
+Notes to self:
+  -> Filtering: comparitive testing deems apeglm a better algorithm, as it generates less sparse plots allowing ease of interpretation when compared to  IHW. Approximate Posterior Estimation for generalized linear model, apeglm, has lower bias than previously proposed shrinkage estimators, while still reducing variance for those genes with little information for statistical inference. (allows to remove noise)
+  
+  -> Differential analysis:carried out by including information regarding sample conditions and year when it was obtained (a batch of sort). 
+  
+
+```{r}
+ddsFCT <-DESeqDataSetFromTximport(txi.salmon.genes, SampleTable, ~ year + condition) #analysis accounts for both condition and year 
+#Carries out differential analysis. 
+ddsFCT <- DESeq(ddsFCT, test = "Wald")
+
+# Define contrast for comparison (Resistant vs Sensitive). Sensitive is used as baseline. 
+
+ddsFCT$condition <- factor(ddsFCT$condition, levels = c("Sensitive","Resistant"))
+ddsFCT <- DESeq(ddsFCT)
+res_ddsFCT <- results(ddsFCT)
+summary(res_ddsFCT)
+plotDispEsts(ddsFCT)
+
+expression_data <- counts(ddsFCT)
+```
+
+
+```{r,fig.width=15, fig.height=15}
+#Conversion to entrez ID on all database. 
+remove_after_period <- function(x) {
+  sub("\\..*", "", x)
+}
+
+#Adds ensebl id, used to plot the heatmap.
+res_ddsFCT.df <- as.data.frame(res_ddsFCT)
+EnseblID <- as.character(lapply(rownames(res_ddsFCT.df), remove_after_period))
+res_ddsFCT.df$ENsembl <- EnseblID
+res_ddsFCT.df
+res_ddsFCT.df_ensembl.unique <- na.omit(res_ddsFCT.df[!duplicated(res_ddsFCT.df$ENsembl), ])
+rownames(res_ddsFCT.df_ensembl.unique) <- res_ddsFCT.df_ensembl.unique$ENsembl
+res_ddsFCT.df_ensembl.unique
+res_ddsFCT.df_ensembl.unique$GeneID <- mapIds(org.Hs.eg.db, keys =rownames(res_ddsFCT.df_ensembl.unique), keytype = "ENSEMBL", column="SYMBOL")
+res_ddsFCT.df_ensembl.unique$EntrezID <- mapIds(org.Hs.eg.db, keys =rownames(res_ddsFCT.df_ensembl.unique), keytype = "ENSEMBL", column="ENTREZID")
+
+res_ddsFCT.df_ensembl.unique <- na.omit(res_ddsFCT.df_ensembl.unique)
+res_ddsFCT.df_ensembl.unique <- na.omit(res_ddsFCT.df_ensembl.unique[!duplicated(res_ddsFCT.df_ensembl.unique$GeneID), ])
+rownames(res_ddsFCT.df_ensembl.unique) <-  res_ddsFCT.df_ensembl.unique$GeneID
+res_ddsFCT.df
+# Draw a volcano plot of all differentially expressed genes. 
+DEGs_plot <- EnhancedVolcano(res_ddsFCT.df_ensembl.unique,
+  lab = rownames(res_ddsFCT.df_ensembl.unique),
+  title="Differentially expressed genes",
+  pCutoff = 0.05,
+  x = 'log2FoldChange',
+  y = 'padj',
+  FCcutoff = 2,
+  col=c('black', 'black', 'black', 'red3'),
+  colAlpha = 1,
+  titleLabSize = 16,  # Adjust this value to change the title size
+  labSize = 5.0  )
+ggsave("./rm_MBT168/DEGs_plot.png", plot = DEGs_plot, width = 10, height = 12, dpi = 300)
+#Filters based on logFC and p-adjusted. Output a csv of filtered genes. 
+res_ddsFCT.df_ensembl.unique__log_fil <-  res_ddsFCT.df_ensembl.unique[(abs(res_ddsFCT.df_ensembl.unique$log2FoldChange) > 2 & res_ddsFCT.df_ensembl.unique$padj < 0.05),]
+res_ddsFCT.df_ensembl.unique__log_fil
+write.csv(res_ddsFCT.df_ensembl.unique, "./rm_MBT168/DeSeq_results_outliers_removed.csv")
+
+
+# Lists containing genes of interest. 
+genes_of_interest_GBM = c("PTEN", "TP53", "RB1", "NF1", "EGFR", "PIK3CA", "PIK3R1", "TERT", "EGF","PCSK5", "PTPRZ1", "COL4A1", "PTN", "GRIN2B", "FGFR2",  "COL4A2", "COL3A1", "PDGFA", "PDGFRA", "GFAP", "COL5A1", "COL5A2", "MYCN")
+genes_of_interest_DNA = c("ATM", "ATR", "ATRX", "BRCA1", "BRCA2", "BRIP1", "C11orf30", "FANCA", "FANCC", "FANCD2", "FANCE", "FANCF", "FANCG", "FANCL", "MGMT" , "MDM2", "MDM4", "MLH1", "MUTYH", "NPM1", "PALB2", "PPP2R1A", "RAD50", "RAD51", "STAG2","FEN1")
+
+genes_of_interest.DNA.df = res_ddsFCT.df_ensembl.unique[genes_of_interest_DNA,]
+genes_of_interest.GBM.df = res_ddsFCT.df_ensembl.unique[genes_of_interest_GBM,]
+
+# Draw a volcano plot of differentially expressed genes of interest.
+DNA_plot <- EnhancedVolcano(genes_of_interest.DNA.df,
+  lab = rownames(genes_of_interest.DNA.df),
+  title = "Differentially expressed genes of interest: DNA repair",
+  pCutoff = 0.05,
+  x = 'log2FoldChange',
+  y = 'padj',
+  FCcutoff = 2,
+  col=c('black', 'black', 'black', 'red3'),
+  colAlpha = 1, 
+  titleLabSize = 16,  # Adjust this value to change the title size
+  labSize = 5.0 )
+ggsave("./rm_MBT168/DNA_plot.png", plot = DNA_plot, width = 10, height = 12, dpi = 300)
+
+GBM_Hll_plot <- EnhancedVolcano(genes_of_interest.GBM.df,
+  lab = rownames(genes_of_interest.GBM.df),
+  title = "Differentially expressed genes of interest: Hallmark Glioblastoma",
+  pCutoff = 0.05,
+  x = 'log2FoldChange',
+  y = 'padj',
+  FCcutoff = 0.5,
+  col=c('black', 'black', 'black', 'red3'),
+  colAlpha = 1, 
+  titleLabSize = 16,  # Adjust this value to change the title size
+  labSize = 5.0 )
+ggsave("./rm_MBT168/GBM_Hll_plot.png", plot = GBM_Hll_plot, width = 10, height = 12, dpi = 300)
+
+```
+
+```{r}
+
+res_ddsFCT.df_ensembl.unique
+
+
+res_ddsFCT.df_ensembl.unique_sorted <- res_ddsFCT.df_ensembl.unique[order(res_ddsFCT.df_ensembl.unique$stat), ]
+
+
+write.csv(res_ddsFCT.df_ensembl.unique_sorted, "./rm_MBT168/genes_ranked_stat")
+```
+
+#### *Plotting results*
+
+Analysis rationale:
+
+  -> Transformation: carried out to allow gene counts to be compared correctly. 
+  -> PCA: carried out to explore data relationships within gene-counts. 
+  -> Dispersion: carried to see how the model chosen performs on the gene counts data chosen. 
+  -> Heat-map: 2 heat-maps are drawn here. The first one uses normalized data to check that normalization is effective. Second one highlihgted the differentially expressed genes between expression. 
+  -> Sample distances heat-map: allows to highlight distances (relationships) between samples.  
+
+```{r}
+
+#Log transformation used for plotting (here different transformations are tested)
+vsd <- vst(ddsFCT, blind=FALSE)
+vsd.values <- assay(vsd)
+
+#3D PCA 
+library(plotly)
+library(stats)
+
+
+pcaData <- plotPCA(vsd, intgroup="condition", returnData=TRUE)
+
+percentVar <- round(100 * attr(pcaData, "percentVar"))
+
+library(ggplot2)
+ggplot(pcaData, aes(PC1, PC2, color=condition, shape=condition)) +
+  geom_point(size=3) +
+  xlab(paste0("PC1: ",percentVar[1],"% variance")) +
+  ylab(paste0("PC2: ",percentVar[2],"% variance")) + 
+  title("PCA with sample MBT168 removed")
+  coord_fixed()
+
+ggsave("./rm_MBT168/PCA_plot.png", width=10, height=8, dpi=300)
+
+components <- pca[["x"]]
+
+components <- data.frame(components)
+components
+components$PC2 <- -components$PC2
+
+components$PC3 <- -components$PC3
+condition <- c("res", "res", "res", "sens", "sens","sens")
+components = cbind(components, condition)
+components
+fig <- plot_ly(components, x = ~PC1, y = ~PC2, z = ~PC3, color = ~components$condition, hoverinfo = 'text' ,colors = c('#EF553B','#00CC96') ) %>%
+
+  add_markers(size = 12)%>%
+  add_text(x = ~PC1, y = ~PC2, z = ~PC3, text=~rownames(components), textposition = 'top right')
+
+
+fig <- fig %>%
+
+  layout(
+    title = "Removed S_MBT168",
+    scene = list(bgcolor = "#e5ecf6")
+)
+
+fig
+
+```
+
+
+```{r,fig.width=20, fig.height=25}
+#BiocManager::install("ComplexHeatmap")
+library(ComplexHeatmap)
+library(RColorBrewer)
+library(circlize)
+
+
+# This function generates a heatmap. Input is a dataframe with geneSymbol as rownames and 2 columns Contains entrezIDs and ENSEMBL ENTRIES respectively
+heatmap_generator <- function (geneSYMBOL.DeSeqRes.df, genes_range.int, ddsFCT.object){
+# Heatmap using differentially expressed genes.
+heatmap_df1 <- geneSYMBOL.DeSeqRes.df[(geneSYMBOL.DeSeqRes.df$padj < 0.05),  ]
+heatmap_df1$GeneID <- mapIds(org.Hs.eg.db, keys = heatmap_df1$ENsembl, keytype = "ENSEMBL", column="SYMBOL")
+heatmap_df1 <- heatmap_df1[order(heatmap_df1$log2FoldChange,decreasing = TRUE),]
+heatmap_df1 <- na.omit(heatmap_df1)
+
+mat_scaled <- as.data.frame(counts(ddsFCT.object, normalized=TRUE))
+
+#This dataframe is used to draw the heatmap downstream 
+EnseblID_heatmap <- as.character(lapply(rownames(mat_scaled), remove_after_period))
+mat_scaled$EnseblID <- EnseblID_heatmap
+
+mat_scaled$GeneID <- mapIds(org.Hs.eg.db, keys = mat_scaled$EnseblID , keytype = "ENSEMBL", column="SYMBOL")
+mat_scaled.ENsembl <- mat_scaled[!duplicated(mat_scaled$GeneID ), ]
+mat_scaled.ENsembl <-  na.omit(mat_scaled.ENsembl)
+
+rownames(mat_scaled.ENsembl) <- mat_scaled.ENsembl$GeneID
+
+mat_scaled.ENsembl.data <- mat_scaled.ENsembl[, !(names(mat_scaled.ENsembl) %in% c("GeneID", "EnseblID"))]
+
+mat_scaled <- t(apply(mat_scaled.ENsembl.data, 1, scale))
+colnames(mat_scaled) <-  colnames(mat_scaled.ENsembl.data) 
+mat_scaled
+
+mat_scaled.filtered <- mat_scaled[rownames(heatmap_df1),]
+
+mat_scaled.filtered <-  na.omit(mat_scaled.filtered)
+numkeep <- genes_range.int
+
+plotted.rows <- c(seq(1:numkeep), seq((nrow(mat_scaled.filtered)-numkeep), nrow(mat_scaled.filtered)))
+
+l2_value <- as.matrix(heatmap_df1[plotted.rows,]$log2FoldChange)
+colnames(l2_value) <- "logFC"
+
+mean <- as.matrix(heatmap_df1[plotted.rows,]$baseMean)
+colnames(mean) <- "AveExpr"
+
+#Heat-map visual parameters
+col_logFC <- colorRamp2(c(min(l2_value),0, max(l2_value)), c('#d7191c','#fdae61','#ffffbf'))
+col_avg_exp <-   colorRamp2(c(quantile(mean)[1], quantile(mean)[4]), c('#abdda4', '#2b83ba'))
+
+
+ha <- HeatmapAnnotation(summmary= anno_summary(gp = gpar(fill=2), height = unit(2, "cm")))
+
+h1 <- Heatmap(mat_scaled.filtered[plotted.rows,], cluster_rows = F, column_labels = colnames(mat_scaled.filtered), name= "Z-score", cluster_columns = T)
+h2 <- Heatmap(l2_value, row_labels = heatmap_df1$GeneID[plotted.rows], cluster_rows = F, name="logFC", col= col_logFC)
+
+heatmap <- h1+ h2 
+png("./rm_MBT168/Heatmap.png", width = 1120, height = 2100, res = 300)
+draw(heatmap)
+return(heatmap)
+}
+
+
+heatmap_fun <- heatmap_generator(res_ddsFCT.df_ensembl.unique, ddsFCT.object = ddsFCT,genes_range.int=20)
+
+heatmap_fun
+
+```
+
+
+
+```{r}
+#Outputs DEGs ranked from higher to lower by statistical (stat) result. 
+ranked_list.dataframe <- function(ddsFCT.object){
+  remove_after_period <- function(x) {
+  sub("\\..*", "", x)
+}
+
+ddfct.results <- results(ddsFCT.object)
+ddfct.results <- na.exclude(ddfct.results)
+ddfct.results<- ddfct.results[(ddfct.results$padj < 0.05),   ]
+
+ENSEMBLID <- as.character(lapply(rownames(ddfct.results), remove_after_period))
+rownames(ddfct.results) <- ENSEMBLID
+
+ddfct.results$GeneID <- mapIds(org.Hs.eg.db, keys = rownames(ddfct.results), keytype = "ENSEMBL", column="SYMBOL")
+ddfct.results <- na.exclude(ddfct.results)
+rownames(ddfct.results) <- ddfct.results$GeneID
+ordered.df <- ddfct.results[order(ddfct.results$stat,decreasing = TRUE),]
+ranked_df <- ordered.df[,c("stat", "GeneID")]
+
+return(ranked_df)
+}
+
+
+#Outputs scaled matrix of differential expressed counts values
+scaled_matrix <- function(ddsFCT.object, ranked.df){
+
+remove_after_period <- function(x) {
+  sub("\\..*", "", x)
+}
+ddsFCT_norm_counts <- counts(ddsFCT.object)
+ENSEMBLID <- as.character(lapply(rownames(ddsFCT_norm_counts), remove_after_period))
+rownames(ddsFCT_norm_counts) <- ENSEMBLID
+
+GeneID <- mapIds(org.Hs.eg.db, keys =rownames(ddsFCT_norm_counts), keytype = "ENSEMBL", column="SYMBOL")
+rownames(ddsFCT_norm_counts)<- GeneID
+
+ranks <- ranked.df
+
+matching_row_names <- ranks$GeneID[ranks$GeneID %in% rownames(ddsFCT_norm_counts)]
+
+diff_expres <- ddsFCT_norm_counts[matching_row_names,]
+diff_expres <- t(apply(diff_expres, 1, scale))
+colnames(diff_expres) <- colnames(ddsFCT_norm_counts)
+return(diff_expres)
+
+}
+
+#Calls fuctions previously defined. 
+ranked_list.df<- ranked_list.dataframe(ddsFCT)
+expression_data_scaled <- scaled_matrix(ddsFCT, ranked_list.df)
+
+write.csv(ranked_list.df, "./rm_MBT168/ranked_list_no_out.csv")
+write.csv(expression_data_scaled, "./rm_MBT168/expression_data.csv")
+
+```
+
+
+
+```{r}
+ranked_list.dataframe <- function(ddsFCT.object){
+  remove_after_period <- function(x) {
+  sub("\\..*", "", x)
+}
+
+ddfct.results <- results(ddsFCT.object)
+ddfct.results <- na.exclude(ddfct.results)
+ddfct.results<- ddfct.results[(ddfct.results$padj < 0.05),   ]
+
+ENSEMBLID <- as.character(lapply(rownames(ddfct.results), remove_after_period))
+rownames(ddfct.results) <- ENSEMBLID
+
+ddfct.results$GeneID <- mapIds(org.Hs.eg.db, keys = rownames(ddfct.results), keytype = "ENSEMBL", column="SYMBOL")
+ddfct.results <- na.exclude(ddfct.results)
+rownames(ddfct.results) <- ddfct.results$GeneID
+ordered.df <- ddfct.results[order(ddfct.results$stat,decreasing = TRUE),]
+ranked_df <- ordered.df[,c("stat", "GeneID")]
+
+return(ranked_df)
+}
+
+ranked_list.df<- ranked_list.dataframe(ddsFCT)
+
+ranked_list.df
+write.csv(ranked_list.df, "./rm_MBT168/ranked_list_no_out.csv")
+
+```
+
+
+Heatmap of all DEGs and genes of interest. 
+```{r}
+
+library(gplots)
+
+
+mat_scaled <- as.data.frame(counts(ddsFCT, normalized=TRUE))
+
+#This dataframe is used to draw the heatmap downstream 
+EnseblID_heatmap <- as.character(lapply(rownames(mat_scaled), remove_after_period))
+mat_scaled$EnseblID <- EnseblID_heatmap
+
+mat_scaled$GeneID <- mapIds(org.Hs.eg.db, keys = mat_scaled$EnseblID , keytype = "ENSEMBL", column="SYMBOL")
+mat_scaled.ENsembl <- mat_scaled[!duplicated(mat_scaled$GeneID ), ]
+mat_scaled.ENsembl <-  na.omit(mat_scaled.ENsembl)
+
+rownames(mat_scaled.ENsembl) <- mat_scaled.ENsembl$GeneID
+
+mat_scaled.DEGs <- mat_scaled.ENsembl[rownames(ranked_list.df),]
+
+DGEs <- subset(mat_scaled.DEGs, select = -c(GeneID, EnseblID))
+
+
+svg(filename = "./rm_MBT168/heatmap_all_DEGS.svg", width = 1920, height = 1080)
+
+# Create heatmap
+all_DEGs <- heatmap.2(data.matrix(DGEs),
+          dendrogram = "both",
+          trace = "none",
+          scale = "row",
+          col = colorRampPalette(rev(brewer.pal(n = 9, name = "RdBu")))(100),
+          margins = c(10, 10),
+          labRow = NA,  # Hide row names
+          cexCol = 0.7)
+
+
+```
+
+
+
+
+*Export results as a html report*
+```{r}
+des2Report <- HTMLReport(shortName = 'RNAseq_analysis_with_DESeq2',
+                         title = 'RNA-seq analysis of differential expression using DESeq2',
+                         reportDirectory = "./results/DEG/rm_MBT168/")
+
+publish(ddsFCT,des2Report, pvalueCutoff=0.05,
+        annotation.db="org.Hs.eg.db", factor = c( colData(ddsFCT)$condition,colData(ddsFCT)$year),
+        reportDir="./results/DEG/reports")
+
+finish(des2Report)
+
+```
+
+```{r}
+sessionInfo()
+```
